@@ -1,0 +1,94 @@
+---
+title: "US Accidents June 2016 - 2020"
+output: html_notebook
+---
+
+ 
+Our team NextGen 6G was presented with a problem where we are to design an app for distracted driving. The solution we have devised is to detect distracted driving with the use of facial detection, detect if a user is driving near or within a high risk for accidents zone, and alerts the user of each detection. The alerts are provided via a phone app using React native. Data is consumed from a Java based Spring Boot Application's API to then send an alert to the user via text-to-speech, in order to encourage the user to not look at their phone. The Spring Boot Application takes in data from a raspberry pi which is hooked to a camera and stores it in a MySQL database to track the user's data for being distracted or not. In addition, the application has the high risk for accidents zones stored in the database to be able to calculate if a user is within a high risk for accidents zone. Below is how we gathered the data and extrapolated the data that defines the high risk for accidents zone.
+
+First we found data on [US accidents on Kaggle](https://www.kaggle.com/sobhanmoosavi/us-accidents) so that we could use an algorithm to find high risk for accidents zones. The data is a countrywide car accident dataset, which covers 49 states of the USA. The accident data are collected from February 2016 to June 2020, using two APIs that provide streaming traffic incident (or event) data. These APIs broadcast traffic data captured by a variety of entities, such as the US and state departments of transportation, law enforcement agencies, traffic cameras, and traffic sensors within the road-networks. Currently, there are about 3.5 million accident records in this dataset.
+
+
+```{r Reading in Dataset, error=FALSE, eval=FALSE}
+library(readr)
+library(dplyr)
+US_Accidents_June20 <- subset(read_csv("US_Accidents_June20.csv"), select = -c(Source, TMC, End_Lat, End_Lng))
+```
+
+
+```{r Displaying the Main Dataset }
+library(knitr)
+kable(US_Accidents_June20[1:5,1:16], caption = "US Accidents Table")
+```
+
+For testing purposes we took a subset for Seattle, Washington by using 98144 as the zipcode. Thus the data we are using for our high risk for accidents zones model. Below is the table of the subset for Seattle, Washington and the plotting of the subset for Seattle, Washington accidents.
+
+```{r Display Seattle WA Subset}
+seattle_with_zip <- filter(US_Accidents_June20, grepl("98144", Zipcode, fixed = TRUE))
+kable(seattle_with_zip[1:10,1:16], caption = "US Accidents within Seattle, Washington Table")
+```
+
+The plotting of the subset for Seattle, Washington accidents with severity level of three or four.
+
+```{r, message=FALSE}
+library(tidyverse)
+library(ggmap)
+seattle_with_zip_severity <- filter(seattle_with_zip, Severity == 4 | Severity == 3)
+locations_sf <- subset(seattle_with_zip_severity, select = c("Start_Lng", "Start_Lat"))
+map <- get_googlemap(center = c(mean(locations_sf$Start_Lng), mean(locations_sf$Start_Lat)), zoom = 14)
+ggmap(map, extent = "panel") + geom_point(data = locations_sf, aes(x = Start_Lng, y = Start_Lat), color='blue')
+```
+Filtering out some outliers by using percentiles of longitude and latitude and using point density.
+
+```{r, message=FALSE}
+lower_bound_lat <- quantile(locations_sf$Start_Lat, 0.025)
+lower_bound_lng <- quantile(locations_sf$Start_Lng, 0.025)
+upper_bound_lat <- quantile(locations_sf$Start_Lat, 0.975)
+upper_bound_lng <- quantile(locations_sf$Start_Lng, 0.975)
+locations_sf_filtered <- filter(locations_sf, (Start_Lng <= upper_bound_lng & Start_Lng >= lower_bound_lng) & (Start_Lat <= upper_bound_lat & Start_Lat >= lower_bound_lat))
+filtered <- pointdensity(locations_sf_filtered, eps = .0005, type = "frequency")
+locations_sf_filtered_nonoise <- locations_sf_filtered[filtered >= 5,]
+map_filtered <- get_googlemap(center = c(mean(locations_sf_filtered_nonoise$Start_Lng), mean(locations_sf_filtered_nonoise$Start_Lat)), zoom = 14)
+ggmap(map_filtered, extent = "panel") + geom_point(data = locations_sf_filtered_nonoise, aes(x = Start_Lng, y = Start_Lat), color='blue')
+```
+
+In order to find the high risk for accidents zones for the subset for Seattle, Washington we perform a k-means clustering on the data.
+
+```{r}
+(cl <- kmeans(locations_sf_filtered_nonoise, 3, nstart = 50))
+plot(locations_sf_filtered_nonoise, col = cl$cluster, xlab= "lon", ylab= "lat")
+points(cl$centers, col = 1:5, pch = 8)
+```
+
+Now that we have the data clustered, we now know the centers of the high risk for accidents zones but not the radius for each. To find the radius for each zone we need to calculate the distance of the furthermost point from the center in each cluster. 
+
+```{r}
+library(raster)
+library(geosphere)
+clusters <- cbind(locations_sf_filtered_nonoise, cl$cluster)
+haz_zone_one <- subset(filter(clusters, cl$cluster == 1), select = c("Start_Lng", "Start_Lat"))
+haz_zone_two <- subset(filter(clusters, cl$cluster == 2), select = c("Start_Lng", "Start_Lat"))
+haz_zone_three <- subset(filter(clusters, cl$cluster == 3), select = c("Start_Lng", "Start_Lat"))
+radius_one <- (max(pointDistance(cl$centers[1,], haz_zone_one, FALSE)) ) 
+radius_two <- (max(pointDistance(cl$centers[2,], haz_zone_two, FALSE)) ) 
+radius_three <- (max(pointDistance(cl$centers[3,], haz_zone_three, FALSE))) 
+centers <- data.frame(cl$centers)
+radius <- rbind("1" = radius_one, "2" = radius_two,  "3" = radius_three)
+zones <- data.frame("Center_Lng" = centers$Start_Lng, "Center_Lat" = centers$Start_Lat, "Radius" = radius)
+kable(zones, caption = "The High Risk for Accidents Zones")
+```
+
+
+```{r}
+plot(locations_sf_filtered_nonoise, col = cl$cluster, xlab= "lon", ylab= "lat")
+points(zones[,1:2], col = 1:5, pch = 8)
+draw.circle(zones[1,1],zones[1,2],zones[1,3],border="blue")
+draw.circle(zones[2,1],zones[2,2],zones[2,3],border="blue")
+draw.circle(zones[3,1],zones[3,2],zones[3,3],border="blue")
+```
+
+
+```{r, echo=FALSE}
+ggmap(map_filtered, extent = "panel") + geom_point(data = centers, aes(x = Start_Lng, y = Start_Lat), color='blue') + geom_point(aes(x = Start_Lng, y = Start_Lat), data = centers[1,], size = radius_one, shape = 1,  color = "#ff0000") + geom_point(aes(x = Start_Lng, y = Start_Lat), data = centers[2,], size = radius_two, shape = 1,  color = "#ff0000") + geom_point(aes(x = Start_Lng, y = Start_Lat), data = centers[3,], size = radius_three, shape = 1,  color = "#ff0000")
+```
+
